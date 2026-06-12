@@ -37,6 +37,7 @@ const mockPage = {
   close: mockClose,
   url: mock(() => 'https://example.com'),
   waitForNetworkIdle: mock(() => Promise.resolve()),
+  waitForSelector: mock(() => Promise.resolve({} as any)),
   addScriptTag: mock(() => Promise.resolve()),
   evaluate: mockEvaluate,
 }
@@ -95,10 +96,10 @@ const ARTICLE_HTML = `<!DOCTYPE html>
 
 function makeDDGHtml(results: Array<{ title: string; url: string; snippet: string; isAd?: boolean }>) {
   const items = results.map(r => `
-    <div class="result${r.isAd ? ' result--ad' : ''}">
-      <a class="result__a" href="//duckduckgo.com/l/?uddg=${encodeURIComponent(r.url)}">${r.title}</a>
-      <div class="result__snippet">${r.snippet}</div>
-    </div>`).join('')
+    <article data-testid="result">
+      <a data-testid="result-title-a" href="${r.isAd ? `https://duckduckgo.com/y.js?ad_domain=${encodeURIComponent(r.url)}` : r.url}">${r.title}</a>
+      <div data-result="snippet">${r.snippet}</div>
+    </article>`).join('')
   return `<html><body>${items}</body></html>`
 }
 
@@ -183,24 +184,16 @@ describe('search', () => {
 
   test('3件の結果を正しくパースする', async () => {
     mockContent.mockResolvedValueOnce(makeDDGHtml([
-      { title: 'Title 1', url: 'https://example1.com', snippet: 'Snippet 1' },
-      { title: 'Title 2', url: 'https://example2.com', snippet: 'Snippet 2' },
-      { title: 'Title 3', url: 'https://example3.com', snippet: 'Snippet 3' },
+      { title: 'Title 1', url: 'https://example1.com/', snippet: 'Snippet 1' },
+      { title: 'Title 2', url: 'https://example2.com/', snippet: 'Snippet 2' },
+      { title: 'Title 3', url: 'https://example3.com/', snippet: 'Snippet 3' },
     ]))
 
     const results = await search('test', 5)
     expect(results).toHaveLength(3)
-    expect(results[0]).toEqual({ title: 'Title 1', url: 'https://example1.com', snippet: 'Snippet 1' })
-    expect(results[1]!.url).toBe('https://example2.com')
+    expect(results[0]).toEqual({ title: 'Title 1', url: 'https://example1.com/', snippet: 'Snippet 1' })
+    expect(results[1]!.url).toBe('https://example2.com/')
     expect(results[2]!.title).toBe('Title 3')
-  })
-
-  test('uddg URLをデコードして復元する', async () => {
-    mockContent.mockResolvedValueOnce(makeDDGHtml([
-      { title: 'Encoded', url: 'https://example.com/path?q=hello world', snippet: '' },
-    ]))
-    const results = await search('test', 5)
-    expect(results[0]!.url).toBe('https://example.com/path?q=hello world')
   })
 
   test('%エンコードを含むURLを二重デコードしない', async () => {
@@ -211,62 +204,44 @@ describe('search', () => {
     expect(results[0]!.url).toBe('https://example.com/a%20b')
   })
 
-  test('.result--ad クラスをスキップする', async () => {
+  test('スポンサー枠（/y.js リダイレクト）をスキップする', async () => {
     mockContent.mockResolvedValueOnce(makeDDGHtml([
-      { title: 'Organic', url: 'https://organic.com', snippet: 'Real result' },
-      { title: 'Ad Result', url: 'https://ad.com', snippet: 'Ad content', isAd: true },
-      { title: 'Organic 2', url: 'https://organic2.com', snippet: 'Real result 2' },
+      { title: 'Organic', url: 'https://organic.com/', snippet: 'Real result' },
+      { title: 'Ad Result', url: 'https://ad.com/', snippet: 'Ad content', isAd: true },
+      { title: 'Organic 2', url: 'https://organic2.com/', snippet: 'Real result 2' },
     ]))
     const results = await search('test', 10)
     expect(results).toHaveLength(2)
-    expect(results.every(r => r.url !== 'https://ad.com')).toBe(true)
+    expect(results.every(r => !r.url.includes('/y.js'))).toBe(true)
   })
 
   test('広告除外後に limit 件でスライスする', async () => {
     mockContent.mockResolvedValueOnce(makeDDGHtml([
-      { title: 'T1', url: 'https://e1.com', snippet: '' },
-      { title: 'Ad', url: 'https://ad.com', snippet: '', isAd: true },
-      { title: 'T2', url: 'https://e2.com', snippet: '' },
-      { title: 'T3', url: 'https://e3.com', snippet: '' },
-      { title: 'T4', url: 'https://e4.com', snippet: '' },
+      { title: 'T1', url: 'https://e1.com/', snippet: '' },
+      { title: 'Ad', url: 'https://ad.com/', snippet: '', isAd: true },
+      { title: 'T2', url: 'https://e2.com/', snippet: '' },
+      { title: 'T3', url: 'https://e3.com/', snippet: '' },
+      { title: 'T4', url: 'https://e4.com/', snippet: '' },
     ]))
     expect(await search('test', 2)).toHaveLength(2)
   })
 
-  test('.result 要素なし → 空配列', async () => {
+  test('result要素なし → 空配列', async () => {
     expect(await search('test', 5)).toHaveLength(0)
   })
 
-  test('uddg パラメータなし → その要素をフィルタ', async () => {
+  test('タイトルリンクなし → その要素をフィルタ', async () => {
     mockContent.mockResolvedValueOnce(`<html><body>
-      <div class="result">
-        <a class="result__a" href="/no-uddg">No uddg link</a>
-        <div class="result__snippet">snippet</div>
-      </div>
+      <article data-testid="result">
+        <div data-result="snippet">snippet without title link</div>
+      </article>
     </body></html>`)
     expect(await search('test', 5)).toHaveLength(0)
   })
 
-  test('href 属性なし → その要素をフィルタ', async () => {
-    mockContent.mockResolvedValueOnce(`<html><body>
-      <div class="result">
-        <a class="result__a">No href attribute</a>
-        <div class="result__snippet">snippet</div>
-      </div>
-    </body></html>`)
-    expect(await search('test', 5)).toHaveLength(0)
-  })
-
-  test('直リンクhref（uddgなし）も結果として返す', async () => {
-    mockContent.mockResolvedValueOnce(`<html><body>
-      <div class="result">
-        <a class="result__a" href="https://direct.example.com/page">Direct</a>
-        <div class="result__snippet">direct link</div>
-      </div>
-    </body></html>`)
-    const results = await search('test', 5)
-    expect(results).toHaveLength(1)
-    expect(results[0]!.url).toBe('https://direct.example.com/page')
+  test('ブロック（結果セレクタが出ない）→ throw', async () => {
+    mockPage.waitForSelector.mockRejectedValueOnce(new Error('Waiting for selector failed: timeout'))
+    await expect(search('test', 5)).rejects.toThrow('ブロックされた可能性')
   })
 
   test('アイドル後にブラウザを自動クローズする', async () => {
@@ -283,9 +258,9 @@ describe('search', () => {
 
   test('スニペット要素なし → snippet: "" で返す', async () => {
     mockContent.mockResolvedValueOnce(`<html><body>
-      <div class="result">
-        <a class="result__a" href="//duckduckgo.com/l/?uddg=${encodeURIComponent('https://example.com')}">Title</a>
-      </div>
+      <article data-testid="result">
+        <a data-testid="result-title-a" href="https://example.com/">Title</a>
+      </article>
     </body></html>`)
     const results = await search('test', 5)
     expect(results).toHaveLength(1)
@@ -294,30 +269,14 @@ describe('search', () => {
 
   test('タイトルが空文字でも結果として返す', async () => {
     mockContent.mockResolvedValueOnce(`<html><body>
-      <div class="result">
-        <a class="result__a" href="//duckduckgo.com/l/?uddg=${encodeURIComponent('https://example.com')}"></a>
-        <div class="result__snippet">snippet</div>
-      </div>
+      <article data-testid="result">
+        <a data-testid="result-title-a" href="https://example.com/"></a>
+        <div data-result="snippet">snippet</div>
+      </article>
     </body></html>`)
     const results = await search('test', 5)
     expect(results).toHaveLength(1)
     expect(results[0]!.title).toBe('')
-  })
-
-  test('不正な href URL → その要素をスキップして他を返す', async () => {
-    mockContent.mockResolvedValueOnce(`<html><body>
-      <div class="result">
-        <a class="result__a" href="//invalid url with spaces">Bad URL</a>
-        <div class="result__snippet">bad</div>
-      </div>
-      <div class="result">
-        <a class="result__a" href="//duckduckgo.com/l/?uddg=${encodeURIComponent('https://good.com')}">Good</a>
-        <div class="result__snippet">good</div>
-      </div>
-    </body></html>`)
-    const results = await search('test', 5)
-    expect(results).toHaveLength(1)
-    expect(results[0]!.url).toBe('https://good.com')
   })
 
   test('goto() がthrow → search全体がreject', async () => {
@@ -336,8 +295,8 @@ describe('search', () => {
   })
 
   test('一時的なネットワークエラーは1回リトライして成功する', async () => {
-    mockGoto.mockRejectedValueOnce(new Error('net::ERR_CONNECTION_RESET at https://html.duckduckgo.com'))
-    mockContent.mockResolvedValueOnce(makeDDGHtml([{ title: 'T', url: 'https://e.com', snippet: '' }]))
+    mockGoto.mockRejectedValueOnce(new Error('net::ERR_CONNECTION_RESET at https://duckduckgo.com'))
+    mockContent.mockResolvedValueOnce(makeDDGHtml([{ title: 'T', url: 'https://e.com/', snippet: '' }]))
     const results = await search('test', 5)
     expect(results).toHaveLength(1)
     expect(mockGoto).toHaveBeenCalledTimes(2)

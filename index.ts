@@ -11,6 +11,8 @@ const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (
 const TIMEOUT_SEARCH = 30_000
 const TIMEOUT_FETCH = 20_000
 const NETWORK_IDLE_TIMEOUT = 2_000
+const SEARCH_RESULT_SELECTOR = '[data-testid="result"]'
+const SEARCH_RESULT_TIMEOUT = 12_000
 const MAX_BODY_CHARS = 50_000
 const MAX_TRANSFER_CHARS = MAX_BODY_CHARS * 4 // 空白正規化前のマージン込みでページから転送する上限
 const BROWSER_IDLE_TIMEOUT = 5 * 60_000
@@ -242,24 +244,16 @@ async function withPage<T>(timeout: number, fn: (page: Page) => Promise<T>): Pro
 // ── In-page extractors（puppeteerがシリアライズしてページ内で実行する） ──────
 
 function extractSearchResults(limit: number) {
-  return [...document.querySelectorAll('.result:not(.result--ad)')]
+  return [...document.querySelectorAll('[data-testid="result"]')]
     .flatMap(el => {
-      const a = el.querySelector('.result__a')
-      const href = a?.getAttribute('href')
-      if (!a || !href) return []
-      try {
-        const url = /^https?:\/\//.test(href)
-          ? href // DDGがリダイレクトを挟まない直リンク
-          : new URL(href, location.href).searchParams.get('uddg')
-        if (!url) return []
-        return [{
-          title: a.textContent?.trim() ?? '',
-          url,
-          snippet: el.querySelector('.result__snippet')?.textContent?.trim() ?? '',
-        }]
-      } catch {
-        return []
-      }
+      const a = el.querySelector<HTMLAnchorElement>('[data-testid="result-title-a"]')
+      const url = a?.href
+      if (!a || !url || url.includes('/y.js')) return [] // /y.js はスポンサー枠のリダイレクト
+      return [{
+        title: a.textContent?.trim() ?? '',
+        url,
+        snippet: el.querySelector('[data-result="snippet"]')?.textContent?.trim() ?? '',
+      }]
     })
     .slice(0, limit)
 }
@@ -349,11 +343,16 @@ server.registerTool(
 // ── Implementations ──────────────────────────────────────────────────────────
 
 export async function search(query: string, limit: number) {
-  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
+  const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`
   return withRetry(() => withPage(TIMEOUT_SEARCH, async (page) => {
     const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
     if (response && !response.ok()) {
       throw new Error(`DuckDuckGoがHTTP ${response.status()} を返しました（レート制限の可能性があります）`)
+    }
+    try {
+      await page.waitForSelector(SEARCH_RESULT_SELECTOR, { timeout: SEARCH_RESULT_TIMEOUT })
+    } catch {
+      throw new Error('DuckDuckGoの検索結果を取得できませんでした（bot対策でブロックされた可能性があります）')
     }
     return page.evaluate(extractSearchResults, limit)
   }))

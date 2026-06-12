@@ -39,9 +39,9 @@ LMStudioなどでの設定:
 |---|---|
 | 入力 | `query: string`, `limit: int`（1〜20、デフォルト5。範囲外はスキーマ違反エラー） |
 | 出力 | 1件ごとに `N. {title}\n   URL: {url}\n   {snippet}`（スニペットなしは省略）を空行区切り。0件時は「検索結果が見つかりませんでした。」 |
-| 取得先 | `https://html.duckduckgo.com/html/?q={query}` |
-| 解析 | ページ内で `.result:not(.result--ad)` を走査。URLは `uddg` パラメータの復元、なければ直リンクhrefをそのまま採用。URLを持たない要素・パース不能な要素は黙って除外 |
-| エラー | HTTP非2xx（レート制限など）・ナビゲーション失敗は `isError: true` + `search エラー: {理由}` |
+| 取得先 | `https://duckduckgo.com/?q={query}`（JSレンダリング版。HTMLエンドポイントはheadlessをbot遮断するため不可） |
+| 解析 | 結果セレクタ `[data-testid="result"]` の描画を最大12秒待機後、各要素から `[data-testid="result-title-a"]` のリンク（`/y.js` リダイレクト＝スポンサー枠は除外）と `[data-result="snippet"]` を抽出 |
+| エラー | HTTP非2xx（レート制限など）・ナビゲーション失敗、結果セレクタが現れない場合（bot対策ブロックの可能性）は `isError: true` + `search エラー: {理由}` |
 
 ### `fetch`
 
