@@ -70,9 +70,9 @@ describe.if(!skip)('integration: fetchPage', () => {
   )
 
   test(
-    'https://httpbin.org/status/404 → throw する',
+    '存在しないパス（404） → throw する',
     async () => {
-      await expect(fetchPage('https://httpbin.org/status/404')).rejects.toThrow()
+      await expect(fetchPage('https://example.com/nonexistent')).rejects.toThrow('HTTPエラー 404')
     },
     { timeout: 30_000 },
   )

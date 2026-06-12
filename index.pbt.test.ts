@@ -26,7 +26,19 @@ const class172Arb = fc
   .tuple(fc.integer({ min: 16, max: 31 }), fc.nat(255), fc.nat(255))
   .map(([b, c, d]) => `http://172.${b}.${c}.${d}`)
 
-const privateIpArb = fc.oneof(class10Arb, class192Arb, class172Arb)
+const linkLocalArb = fc
+  .tuple(fc.nat(255), fc.nat(255))
+  .map(([c, d]) => `http://169.254.${c}.${d}`)
+
+const cgnArb = fc
+  .tuple(fc.integer({ min: 64, max: 127 }), fc.nat(255), fc.nat(255))
+  .map(([b, c, d]) => `http://100.${b}.${c}.${d}`)
+
+const privateIpv6Arb = fc
+  .constantFrom('::1', 'fe80::1', 'fc00::1', 'fd12:3456::1', '::ffff:7f00:1', '::ffff:192.168.0.1')
+  .map(ip => `http://[${ip}]`)
+
+const privateIpArb = fc.oneof(class10Arb, class192Arb, class172Arb, linkLocalArb, cgnArb, privateIpv6Arb)
 
 const forbiddenSchemeArb = fc
   .constantFrom('file://', 'ftp://', 'javascript:', 'data:')
@@ -46,7 +58,7 @@ describe('validateUrl PBT', () => {
     )
   })
 
-  test('プロパティ2: プライベートIPは常にthrowする', () => {
+  test('プロパティ2: プライベートIP（v4/v6/CGN/リンクローカル）は常にthrowする', () => {
     fc.assert(
       fc.property(privateIpArb, url => {
         expect(() => validateUrl(url)).toThrow('プライベートIPへのアクセスは拒否されました')
