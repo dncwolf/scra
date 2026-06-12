@@ -31,28 +31,6 @@ LMStudioなどでの設定:
 
 挙動の詳細は後述の [Spec](#spec) を参照。
 
-## 環境変数
-
-| 変数 | 説明 |
-|---|---|
-| `SCRA_DEBUG=1` | stderrへ動作ログ（起動・リトライ・遮断したリクエスト）を出力 |
-| `SCRA_IDLE_TIMEOUT_MS` | アイドル時にブラウザを閉じるまでの時間（デフォルト300,000 = 5分） |
-
-## テスト
-
-```bash
-bun test                                  # 全テスト（ユニット + stdio E2E + 統合）
-SKIP_INTEGRATION=1 bun test               # 実ネットワークを使う統合テストを除外
-SKIP_INTEGRATION=1 SKIP_E2E=1 bun test    # ユニットのみ
-```
-
-| ファイル | 内容 |
-|---|---|
-| `index.test.ts` | ユニット（puppeteer/DNSをモック、抽出関数はJSDOM環境で実行）+ InMemoryTransport経由のMCPテスト |
-| `index.e2e.test.ts` | 実プロセスを起動してstdioでMCP対話・切断時の終了を検証 |
-| `index.pbt.test.ts` | `validateUrl` のプロパティベーステスト |
-| `index.integration.test.ts` | 実DuckDuckGo・実Chromiumでの統合テスト |
-
 ## Spec
 
 ### `search`
@@ -73,41 +51,6 @@ SKIP_INTEGRATION=1 SKIP_E2E=1 bun test    # ユニットのみ
 | 出力 | `# {title}\n\n{本文}`。本文は各行trim → 3連以上の改行を2連へ圧縮 → 50,000文字超過分を切り捨て注記を付加（ページからの転送自体も200,000文字で上限） |
 | 描画 | `domcontentloaded` 後、network idle（500ms静止）を最大2秒ベストエフォート待機。Readabilityをページ内へ注入して抽出（CSPはバイパス） |
 | エラー | スキーマ違反 / SSRF拒否 / HTTPエラー / Readability抽出失敗 / リダイレクト遮断による到達失敗 / 20秒タイムアウト |
-
-### SSRF対策
-
-検証は4段階で行う:
-
-1. `validateUrl` — スキーム（`http`/`https` のみ）→ ホスト文字列判定（WHATWG正規化済みIP・`localhost` とそのサブドメイン）
-2. DNS事前解決 — リテラルIP以外のホスト名を解決し、プライベートIPを含めば拒否（解決失敗はフェイルオープンでナビゲーションのエラーに任せる）
-3. リクエストインターセプト — サブリソース・リダイレクトを含む全リクエストに 1〜2 と同じ判定を適用して遮断（`data:`/`blob:`/`about:` は許可）
-4. 最終URL再検証 — `goto` 完了後のURLにも `validateUrl` を適用
-
-遮断対象:
-
-| 分類 | 対象 |
-|---|---|
-| スキーム | `http(s)` 以外（`file://` など。サブリソースの `data:`/`blob:`/`about:` は許可） |
-| IPv4 | ループバック 127/8・10/8・172.16/12・192.168/16・リンクローカル 169.254/16・CGN 100.64/10・0/8（10進・短縮表記も正規化のうえ判定） |
-| IPv6 | `::`・`::1`・ULA `fc00::/7`・リンクローカル `fe80::/10`・IPv4-mapped `::ffff:0:0/96`・NAT64 `64:ff9b::/96`（埋め込みIPv4はIPv4規則で再判定） |
-| ホスト名 | `localhost` とそのサブドメイン、プライベートIPに解決されるホスト名 |
-
-### 信頼性・ライフサイクル
-
-- 一時的エラー（接続リセット系 `net::ERR_*`・`ECONNRESET`・`Target closed`・`Session closed`）は処理全体を1回だけ再実行
-- ブラウザはシングルトン。クラッシュ・切断後は次のリクエストで自動再起動し、アイドル5分（`SCRA_IDLE_TIMEOUT_MS`）で自動終了
-- SIGINT / SIGTERM / stdin EOF / トランスポート切断のいずれでもブラウザを閉じて終了コード0で終了
-
-### 定数
-
-| 定数 | 値 |
-|---|---|
-| `TIMEOUT_SEARCH` | 30秒 |
-| `TIMEOUT_FETCH` | 20秒 |
-| `NETWORK_IDLE_TIMEOUT` | 2秒 |
-| `MAX_BODY_CHARS` | 50,000文字 |
-| `MAX_TRANSFER_CHARS` | 200,000文字 |
-| `BROWSER_IDLE_TIMEOUT` | 5分 |
 
 ## License
 
