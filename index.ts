@@ -12,6 +12,8 @@ const TIMEOUT_SEARCH = 30_000
 const TIMEOUT_FETCH = 20_000
 const NETWORK_IDLE_TIMEOUT = 2_000
 const SEARCH_RESULT_SELECTOR = '[data-testid="result"]'
+// SERP本体（React）が描画済みかの判定に使う。結果0件でもこれは描画される
+const SEARCH_PAGE_READY_SELECTOR = '[data-testid="web-vertical"]'
 const SEARCH_RESULT_TIMEOUT = 12_000
 const MAX_BODY_CHARS = 50_000
 const MAX_TRANSFER_CHARS = MAX_BODY_CHARS * 4 // 空白正規化前のマージン込みでページから転送する上限
@@ -113,12 +115,33 @@ export function validateUrl(url: string): void {
   }
 }
 
+// 1ページの読み込みは同一ホストへ大量のサブリソース要求を伴うため、判定を短TTLでキャッシュする。
+// Promiseを保持することで同時要求時の重複lookupも防ぐ
+const DNS_VERDICT_TTL = 30_000
+const DNS_VERDICT_CACHE_MAX = 1_000
+const dnsVerdicts = new Map<string, { expires: number; privateAddr: Promise<string | null> }>()
+
+// テストが判定順序に依存しないよう、キャッシュをリセットする（テスト専用）
+export function resetDnsCache(): void {
+  dnsVerdicts.clear()
+}
+
 async function assertPublicDns(hostname: string): Promise<void> {
   const host = hostname.replace(/^\[|\]$/g, '')
   if (isIP(host)) return // リテラルIPは validateUrl で検証済み
-  const addrs = await lookup(host, { all: true }).catch(() => []) // 解決失敗はナビゲーション側のエラーに任せる
-  const hit = addrs.find(a => isPrivateIp(a.address))
-  if (hit) throw new Error(`プライベートIPに解決されるホストは拒否されました: ${host} → ${hit.address}`)
+  let entry = dnsVerdicts.get(host)
+  if (!entry || entry.expires <= Date.now()) {
+    if (dnsVerdicts.size >= DNS_VERDICT_CACHE_MAX) dnsVerdicts.clear() // ponytail: 上限超過は全クリア。LRUが要るほど増えない想定
+    entry = {
+      expires: Date.now() + DNS_VERDICT_TTL,
+      privateAddr: lookup(host, { all: true })
+        .catch(() => []) // 解決失敗はナビゲーション側のエラーに任せる
+        .then(addrs => addrs.find(a => isPrivateIp(a.address))?.address ?? null),
+    }
+    dnsVerdicts.set(host, entry)
+  }
+  const hit = await entry.privateAddr
+  if (hit) throw new Error(`プライベートIPに解決されるホストは拒否されました: ${host} → ${hit}`)
 }
 
 // サブリソースで一般的かつ無害なスキームは素通しする
@@ -204,11 +227,18 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+// 検索もフェッチもテキストとリンクしか使わないため、重量サブリソースは取得しない
+const SKIPPED_RESOURCE_TYPES = new Set(['image', 'font', 'media'])
+
 // サブリソースやリダイレクトを含む全リクエストをSSRF検証する
 async function guardPage(page: Page) {
   await page.setRequestInterception(true)
   page.on('request', async (req) => {
     try {
+      if (SKIPPED_RESOURCE_TYPES.has(req.resourceType())) {
+        await req.abort('blockedbyclient')
+        return
+      }
       const reason = await requestBlockReason(req.url())
       if (reason) {
         log('リクエストを遮断:', req.url(), '-', reason)
@@ -243,17 +273,27 @@ async function withPage<T>(timeout: number, fn: (page: Page) => Promise<T>): Pro
 
 // ── In-page extractors（puppeteerがシリアライズしてページ内で実行する） ──────
 
-function extractSearchResults(limit: number) {
-  return [...document.querySelectorAll('[data-testid="result"]')]
+function extractSearchResults(selector: string, limit: number) {
+  return [...document.querySelectorAll(selector)]
     .flatMap(el => {
       const a = el.querySelector<HTMLAnchorElement>('[data-testid="result-title-a"]')
-      const url = a?.href
-      if (!a || !url || url.includes('/y.js')) return [] // /y.js はスポンサー枠のリダイレクト
-      return [{
-        title: a.textContent?.trim() ?? '',
-        url,
-        snippet: el.querySelector('[data-result="snippet"]')?.textContent?.trim() ?? '',
-      }]
+      if (!a?.href) return []
+      try {
+        const parsed = new URL(a.href)
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return []
+        // DDG自身へのリンクはリダイレクトラッパー（/l/?uddg=）の復元のみ許可。
+        // /y.js（スポンサー枠）やDDG内部リンクはここで落ちる
+        const isDdg = /(^|\.)duckduckgo\.com$/.test(parsed.hostname)
+        const url = isDdg ? parsed.searchParams.get('uddg') : a.href
+        if (!url) return []
+        return [{
+          title: a.textContent?.trim() ?? '',
+          url,
+          snippet: el.querySelector('[data-result="snippet"]')?.textContent?.trim() ?? '',
+        }]
+      } catch {
+        return []
+      }
     })
     .slice(0, limit)
 }
@@ -345,16 +385,23 @@ server.registerTool(
 export async function search(query: string, limit: number) {
   const searchUrl = `https://duckduckgo.com/?q=${encodeURIComponent(query)}`
   return withRetry(() => withPage(TIMEOUT_SEARCH, async (page) => {
+    const deadline = Date.now() + TIMEOUT_SEARCH
     const response = await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
     if (response && !response.ok()) {
       throw new Error(`DuckDuckGoがHTTP ${response.status()} を返しました（レート制限の可能性があります）`)
     }
     try {
-      await page.waitForSelector(SEARCH_RESULT_SELECTOR, { timeout: SEARCH_RESULT_TIMEOUT })
-    } catch {
+      // 全体30秒予算を超えないよう、待機は残り予算でクランプする
+      const remaining = Math.max(1, Math.min(SEARCH_RESULT_TIMEOUT, deadline - Date.now()))
+      await page.waitForSelector(SEARCH_RESULT_SELECTOR, { timeout: remaining })
+    } catch (e) {
+      if ((e as Error).name !== 'TimeoutError') throw e // 一時的エラーは withRetry に任せる
+      // SERP本体が描画済みなら正当な0件。描画すらされていなければbot遮断とみなす
+      if (await page.$(SEARCH_PAGE_READY_SELECTOR)) return []
       throw new Error('DuckDuckGoの検索結果を取得できませんでした（bot対策でブロックされた可能性があります）')
     }
-    return page.evaluate(extractSearchResults, limit)
+    await page.waitForNetworkIdle({ idleTime: 500, timeout: NETWORK_IDLE_TIMEOUT }).catch(() => {}) // 漸進描画の残りをベストエフォートで待つ
+    return page.evaluate(extractSearchResults, SEARCH_RESULT_SELECTOR, limit)
   }))
 }
 

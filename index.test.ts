@@ -38,6 +38,7 @@ const mockPage = {
   url: mock(() => 'https://example.com'),
   waitForNetworkIdle: mock(() => Promise.resolve()),
   waitForSelector: mock(() => Promise.resolve({} as any)),
+  $: mock(() => Promise.resolve(null as any)),
   addScriptTag: mock(() => Promise.resolve()),
   evaluate: mockEvaluate,
 }
@@ -77,9 +78,16 @@ mock.module('node:dns/promises', () => ({ lookup: mockLookup }))
 // ── Module under test ─────────────────────────────────────────────────────────
 
 const {
-  validateUrl, search, fetchPage, getBrowser, resetBrowser,
+  validateUrl, search, fetchPage, getBrowser, resetBrowser, resetDnsCache,
   requestBlockReason, server, expandIPv6, formatArticle,
 } = await import('./index')
+
+// puppeteerのTimeoutErrorはnameで見分けられる
+function timeoutError() {
+  const e = new Error('Waiting for selector failed: timeout')
+  e.name = 'TimeoutError'
+  return e
+}
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -107,6 +115,7 @@ function makeDDGHtml(results: Array<{ title: string; url: string; snippet: strin
 
 function setupMocks(defaultContent = EMPTY_HTML) {
   resetBrowser()
+  resetDnsCache()
   _connected = true
   mockLaunch.mockClear()
   mockNewPage.mockClear()
@@ -239,9 +248,58 @@ describe('search', () => {
     expect(await search('test', 5)).toHaveLength(0)
   })
 
-  test('ブロック（結果セレクタが出ない）→ throw', async () => {
-    mockPage.waitForSelector.mockRejectedValueOnce(new Error('Waiting for selector failed: timeout'))
+  test('ブロック（SERP自体が描画されない）→ throw', async () => {
+    mockPage.waitForSelector.mockRejectedValueOnce(timeoutError())
     await expect(search('test', 5)).rejects.toThrow('ブロックされた可能性')
+  })
+
+  test('結果セレクタが出ないがSERPは描画済み → 正当な0件として空配列', async () => {
+    mockPage.waitForSelector.mockRejectedValueOnce(timeoutError())
+    mockPage.$.mockResolvedValueOnce({} as any)
+    expect(await search('test', 5)).toHaveLength(0)
+  })
+
+  test('waitForSelector の一時的エラー（Target closed）はリトライして成功する', async () => {
+    mockPage.waitForSelector.mockRejectedValueOnce(new Error('Protocol error: Target closed'))
+    mockContent.mockResolvedValueOnce(makeDDGHtml([{ title: 'T', url: 'https://e.com/', snippet: '' }]))
+    expect(await search('test', 5)).toHaveLength(1)
+  })
+
+  test('duckduckgo.comへのリンクは uddg パラメータを復元する', async () => {
+    mockContent.mockResolvedValueOnce(`<html><body>
+      <article data-testid="result">
+        <a data-testid="result-title-a" href="https://duckduckgo.com/l/?uddg=${encodeURIComponent('https://example.com/path?q=hello world')}">Wrapped</a>
+      </article>
+    </body></html>`)
+    const results = await search('test', 5)
+    expect(results[0]!.url).toBe('https://example.com/path?q=hello world')
+  })
+
+  test('duckduckgo.com内部リンク（uddgなし）はフィルタする', async () => {
+    mockContent.mockResolvedValueOnce(`<html><body>
+      <article data-testid="result">
+        <a data-testid="result-title-a" href="https://duckduckgo.com/settings">Settings</a>
+      </article>
+    </body></html>`)
+    expect(await search('test', 5)).toHaveLength(0)
+  })
+
+  test('http(s)以外のスキームのリンクはフィルタする', async () => {
+    mockContent.mockResolvedValueOnce(`<html><body>
+      <article data-testid="result">
+        <a data-testid="result-title-a" href="javascript:alert(1)">XSS</a>
+      </article>
+    </body></html>`)
+    expect(await search('test', 5)).toHaveLength(0)
+  })
+
+  test('パスに /y.js を含む非DDGホストは除外しない', async () => {
+    mockContent.mockResolvedValueOnce(makeDDGHtml([
+      { title: 'Yjs', url: 'https://github.com/user/y.js', snippet: 'CRDT library' },
+    ]))
+    const results = await search('test', 5)
+    expect(results).toHaveLength(1)
+    expect(results[0]!.url).toBe('https://github.com/user/y.js')
   })
 
   test('アイドル後にブラウザを自動クローズする', async () => {
@@ -566,8 +624,9 @@ describe('リクエストインターセプト', () => {
   beforeEach(() => setupMocks())
   afterEach(teardown)
 
-  const makeReq = (url: string) => ({
+  const makeReq = (url: string, resourceType = 'document') => ({
     url: () => url,
+    resourceType: () => resourceType,
     continue: mock(() => Promise.resolve()),
     abort: mock(() => Promise.resolve()),
   })
@@ -635,6 +694,24 @@ describe('リクエストインターセプト', () => {
     const req = makeReq('http://127.0.0.1/x')
     req.abort.mockRejectedValue(new Error('already handled'))
     await expect(handler(req)).resolves.toBeUndefined()
+  })
+
+  test('画像・フォント・メディアのリクエストは取得せず abort する', async () => {
+    const handler = await captureHandler()
+    for (const type of ['image', 'font', 'media']) {
+      const req = makeReq('https://cdn.example.com/asset', type)
+      await handler(req)
+      expect(req.abort).toHaveBeenCalledWith('blockedbyclient')
+      expect(req.continue).not.toHaveBeenCalled()
+    }
+  })
+
+  test('同一ホストのDNS判定はキャッシュされ lookup は1回のみ', async () => {
+    const handler = await captureHandler()
+    mockLookup.mockClear()
+    await handler(makeReq('https://dnscache.example.com/a.js'))
+    await handler(makeReq('https://dnscache.example.com/b.js'))
+    expect(mockLookup).toHaveBeenCalledTimes(1)
   })
 })
 

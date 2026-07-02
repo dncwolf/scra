@@ -40,8 +40,8 @@ LMStudioなどでの設定:
 | 入力 | `query: string`, `limit: int`（1〜20、デフォルト5。範囲外はスキーマ違反エラー） |
 | 出力 | 1件ごとに `N. {title}\n   URL: {url}\n   {snippet}`（スニペットなしは省略）を空行区切り。0件時は「検索結果が見つかりませんでした。」 |
 | 取得先 | `https://duckduckgo.com/?q={query}`（JSレンダリング版。HTMLエンドポイントはheadlessをbot遮断するため不可） |
-| 解析 | 結果セレクタ `[data-testid="result"]` の描画を最大12秒待機後、各要素から `[data-testid="result-title-a"]` のリンク（`/y.js` リダイレクト＝スポンサー枠は除外）と `[data-result="snippet"]` を抽出 |
-| エラー | HTTP非2xx（レート制限など）・ナビゲーション失敗、結果セレクタが現れない場合（bot対策ブロックの可能性）は `isError: true` + `search エラー: {理由}` |
+| 解析 | 結果セレクタ `[data-testid="result"]` の描画を最大12秒（全体30秒予算の残りでクランプ）待機し、短いnetwork idleの後に各要素から `[data-testid="result-title-a"]` のリンクと `[data-result="snippet"]` を抽出。http(s)以外のリンクは除外。duckduckgo.comへのリンクは `uddg` パラメータの復元のみ許可（`/y.js` スポンサー枠・内部リンクはここで除外） |
+| エラー | HTTP非2xx（レート制限など）・ナビゲーション失敗、SERP自体が描画されない場合（bot対策ブロックの可能性）は `isError: true` + `search エラー: {理由}`。SERPは描画されたが結果セレクタが現れない場合は正当な0件として扱う |
 
 ### `fetch`
 
@@ -49,7 +49,7 @@ LMStudioなどでの設定:
 |---|---|
 | 入力 | `url: string`（URL形式。違反はスキーマ違反エラー） |
 | 出力 | `# {title}\n\n{本文}`。本文は各行trim → 3連以上の改行を2連へ圧縮 → 50,000文字超過分を切り捨て注記を付加（ページからの転送自体も200,000文字で上限） |
-| 描画 | `domcontentloaded` 後、network idle（500ms静止）を最大2秒ベストエフォート待機。Readabilityをページ内へ注入して抽出（CSPはバイパス） |
+| 描画 | `domcontentloaded` 後、network idle（500ms静止）を最大2秒ベストエフォート待機。Readabilityをページ内へ注入して抽出（CSPはバイパス）。画像・フォント・メディアは取得しない（`search` も同様） |
 | エラー | スキーマ違反 / SSRF拒否 / HTTPエラー / Readability抽出失敗 / リダイレクト遮断による到達失敗 / 20秒タイムアウト |
 
 ## License
