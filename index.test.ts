@@ -500,7 +500,7 @@ describe('fetchPage', () => {
     ))
     const result = await fetchPage('https://example.com')
     expect(result).toContain('切り詰められました')
-    expect(result.length).toBeLessThan(51_000)
+    expect(result.length).toBeLessThan(11_000)
   })
 
   test('バリデーションを内蔵: file:// → throw', async () => {
@@ -537,13 +537,13 @@ describe('fetchPage', () => {
     expect(await fetchPage('https://example.com')).toMatch(/^# Test Article/)
   })
 
-  test('転送上限（200K）超の本文もページ内で切られ注記が付く', async () => {
+  test('転送上限（40K）超の本文もページ内で切られ注記が付く', async () => {
     mockContent.mockImplementationOnce(() => Promise.resolve(
       `<!DOCTYPE html><html><head><title>Huge</title></head><body><article><p>${'a'.repeat(250_000)}</p></article></body></html>`,
     ))
     const result = await fetchPage('https://example.com')
     expect(result).toContain('切り詰められました')
-    expect(result.length).toBeLessThan(51_000)
+    expect(result.length).toBeLessThan(11_000)
   })
 })
 

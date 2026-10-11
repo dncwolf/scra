@@ -15,7 +15,7 @@ const SEARCH_RESULT_SELECTOR = '[data-testid="result"]'
 // SERP本体（React）が描画済みかの判定に使う。結果0件でもこれは描画される
 const SEARCH_PAGE_READY_SELECTOR = '[data-testid="web-vertical"]'
 const SEARCH_RESULT_TIMEOUT = 12_000
-const MAX_BODY_CHARS = 50_000
+const MAX_BODY_CHARS = 10_000 // 32Kコンテキストのローカルモデルで2〜3ページ分を読める長さ（日本語は概ね1文字≒1トークン）
 const MAX_TRANSFER_CHARS = MAX_BODY_CHARS * 4 // 空白正規化前のマージン込みでページから転送する上限
 const BROWSER_IDLE_TIMEOUT = 5 * 60_000
 
