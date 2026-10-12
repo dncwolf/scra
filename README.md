@@ -6,8 +6,10 @@ DuckDuckGoによるWeb検索と[Readability.js](https://github.com/mozilla/reada
 
 ```bash
 git clone https://github.com/dncwolf/scra.git
-cd scra && bun install
+cd scra && bun install  # postinstall で Chrome for Testing（約340MB）も取得
 ```
+
+Chrome は `bunx --bun` で取得する。Node 26 で動く puppeteer 標準のダウンロードは展開が壊れるため、`package.json` の `puppeteer.skipDownload` で止めている。
 
 LMStudioなどでの設定:
 
